@@ -1,0 +1,89 @@
+services:
+  floci-gcp:
+    container_name: local-gcp-floci-gcp
+    image: floci/floci-gcp:0.13.0
+    environment:
+      FLOCI_GCP_HOSTNAME: floci-gcp
+      FLOCI_GCP_BASE_URL: http://floci-gcp:4588
+      # Keep state across restarts in the floci-gcp-data volume
+      FLOCI_GCP_STORAGE_MODE: hybrid
+    networks:
+      - default
+    # イメージ同梱のスクリプトで /_floci-gcp/health が 200 を返すか確認する (curl は無いため bash のみで実行)
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    ports:
+      - "4588:4588"
+    volumes:
+      # Enables Docker-backed services (Cloud Run, Cloud SQL, Kafka, GKE)
+      # - /var/run/docker.sock:/var/run/docker.sock
+      - floci-gcp-data:/app/data
+
+  gcloud:
+    container_name: local-gcp-gcloud
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:stable
+    environment:
+      CLOUDSDK_CORE_PROJECT: floci-local
+      # gcloud は *_EMULATOR_HOST を参照しないため、API の接続先を floci-gcp に上書きする
+      CLOUDSDK_API_ENDPOINT_OVERRIDES_STORAGE: http://floci-gcp:4588/storage/v1/
+      # floci-gcp は認証情報を検証しないため、ダミーのアクセストークンを渡す
+      CLOUDSDK_AUTH_ACCESS_TOKEN: floci
+      CLOUDSDK_CORE_DISABLE_USAGE_REPORTING: "true"
+      CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: "true"
+    networks:
+      - default
+    entrypoint: ["/bin/sh"]
+    tty: true
+
+  golang:
+    container_name: local-gcp-golang
+    image: golang:1.27.4-trixie
+    working_dir: /app
+    environment:
+      PUBSUB_EMULATOR_HOST: floci-gcp:4588
+      FIRESTORE_EMULATOR_HOST: floci-gcp:4588
+      DATASTORE_EMULATOR_HOST: floci-gcp:4588
+      STORAGE_EMULATOR_HOST: http://floci-gcp:4588
+      SECRET_MANAGER_EMULATOR_HOST: floci-gcp:4588
+      FIREBASE_AUTH_EMULATOR_HOST: floci-gcp:4588
+      GOOGLE_CLOUD_PROJECT: floci-local
+    networks:
+      - default
+    volumes:
+      - ./golang-client:/app
+    entrypoint: ["/bin/sh"]
+    tty: true
+
+  terraform:
+    container_name: local-gcp-terraform
+    image: hashicorp/terraform:1.17.2
+    depends_on:
+      floci-gcp:
+        condition: service_healthy
+    env_file:
+      - docker/terraform/.env
+    environment:
+      GOOGLE_CLOUD_PROJECT: floci-local
+    networks:
+      - default
+    volumes:
+      - ./docker/terraform/run.sh:/run.sh:ro
+      - ./terraform:/workspace:ro
+      - terraform-state:/state # tfstate の出力先
+    working_dir: /workspace
+    # docker compose up 時に1回だけ init / apply を実行し、その後は待機する
+    entrypoint: ["/bin/sh"]
+    command: ["/run.sh"]
+    restart: "no"
+
+volumes:
+  floci-gcp-data:
+  terraform-state:
+
+networks:
+  default:
+    name: local-gcp
